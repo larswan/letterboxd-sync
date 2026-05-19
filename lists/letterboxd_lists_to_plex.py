@@ -89,19 +89,27 @@ def fetch_letterboxd_list_with_pagination_and_tmdb(list_url, list_name):
                     title_tag = soup.find('h1', class_='headline-1')
                     if title_tag:
                         title = title_tag.get_text(strip=True)
-                # Get all movies on the page
-                poster_list = soup.find('ul', class_='poster-list')
-                if not poster_list:
-                    return {'title': title, 'movies': all_movies}
-                film_containers = poster_list.find_all('li', class_='poster-container')
+                # Get all movies on the page (new and old page structures)
+                film_containers = soup.find_all('li', class_='griditem')
+                if not film_containers:
+                    poster_list = soup.find('ul', class_='poster-list')
+                    if not poster_list:
+                        return {'title': title, 'movies': all_movies}
+                    film_containers = poster_list.find_all('li', class_='poster-container')
                 for container in film_containers:
                     try:
-                        poster_div = container.find('div', class_='film-poster')
-                        if not poster_div:
+                        film_div = container.find('div', class_='react-component')
+                        if not film_div:
+                            film_div = container.find('div', class_='film-poster')
+                        if not film_div:
                             continue
-                        img = poster_div.find('img', class_='image')
-                        film_name = img['alt'].strip() if img and img.has_attr('alt') else ''
-                        film_slug = poster_div.get('data-film-slug', '')
+
+                        film_name = film_div.get('data-item-name', '').strip()
+                        film_slug = film_div.get('data-item-slug', '') or film_div.get('data-film-slug', '')
+                        if not film_name:
+                            img = film_div.find('img', class_='image')
+                            if img and img.has_attr('alt'):
+                                film_name = img['alt'].strip()
                         year = ''
                         if len(film_slug) >= 4 and film_slug[-4:].isdigit():
                             year = film_slug[-4:]
@@ -223,9 +231,15 @@ def main():
     from lists.get_letterboxd_lists import test_scrape_lists_page_to_json
     test_scrape_lists_page_to_json()
     # Step 2: Load list_names.json
+    if not os.path.exists(LIST_NAMES_FILE):
+        print(f"[ERROR] Missing expected file: {LIST_NAMES_FILE}")
+        return False
     with open(LIST_NAMES_FILE, 'r') as f:
         list_objs = json.load(f)
     print(f"[INFO] Loaded {len(list_objs)} lists from list_names.json")
+    if not list_objs:
+        print("[WARN] No Letterboxd lists discovered.")
+        return True
     # Step 3: Scrape each list and build cache
     lists_cache = {}
     for obj in list_objs:
@@ -239,6 +253,7 @@ def main():
     print(f"[INFO] Saved all lists to {LISTS_CACHE_FILE}")
     # Step 4: Create/update Plex playlists
     plex_playlists_from_lists_cache(lists_cache)
+    return True
 
 if __name__ == '__main__':
     main() 

@@ -10,12 +10,13 @@ CACHE_DIR = os.path.join(BASE_DIR, 'cache')
 LETTERBOXD_CACHE = os.path.join(CACHE_DIR, 'letterboxd_watchlist_cache.json')
 TMDB_CACHE = os.path.join(CACHE_DIR, 'tmdb_watchlist_cache.json')
 PLEX_CACHE = os.path.join(CACHE_DIR, 'plex_watchlist_cache.json')
+OVERSEERR_CACHE = os.path.join(CACHE_DIR, 'overseerr_watchlist_cache.json')
 
 # Import all modules
 from letterboxd_watchlist_scraper import scrape_letterboxd_watchlist
 from tmdb_lookup_from_letterboxd import tmdb_lookup_all
 from plex_watchlist import main as plex_watchlist_main
-from overseerr_monitor import overseerr_monitor_add_from_plex_cache
+from overseerr_monitor import overseerr_monitor_add_from_tmdb_cache
 # Add import for the new multi-list sync
 from lists.letterboxd_lists_to_plex import main as letterboxd_lists_to_plex_main
 
@@ -107,13 +108,19 @@ def main():
             logger.error("PLEX_HOST and PLEX_TOKEN environment variables are required")
             sys.exit(1)
         
+        plex_ok = False
         try:
-            plex_watchlist_main()
-            logger.info("Plex playlist creation completed successfully!")
-            cleanup_old_logs()
+            plex_ok = plex_watchlist_main()
+            if plex_ok and os.path.exists(PLEX_CACHE):
+                logger.info("Plex playlist creation completed successfully!")
+                cleanup_old_logs()
+            else:
+                logger.warning(
+                    "Plex playlist step did not complete (missing cache output). "
+                    "Continuing — Overseerr will use TMDB cache + Overseerr API."
+                )
         except Exception as e:
-            logger.error(f"Error creating Plex playlist: {e}")
-            sys.exit(1)
+            logger.warning(f"Plex playlist step failed: {e}. Continuing without Plex.")
     else:
         logger.info("Skipping Plex watchlist creation (RUN_PLEX_PLAYLIST not enabled)")
     
@@ -126,21 +133,26 @@ def main():
     if 'RUN_OVERSEERR_REQUESTS' in locals():
         logger.info("--- Step 4: Overseerr Requests ---")
         
-        # Check if Plex cache exists
-        if not os.path.exists(PLEX_CACHE):
-            logger.error(f"Plex cache file '{PLEX_CACHE}' not found")
-            logger.error("Please run Plex playlist creation first (enable RUN_PLEX_PLAYLIST)")
+        if not os.path.exists(TMDB_CACHE):
+            logger.error(f"TMDB cache file '{TMDB_CACHE}' not found")
+            logger.error("Please run TMDB lookup first (enable RUN_TMDB_LOOKUP)")
             sys.exit(1)
-        
+
         overseerr_host = os.getenv('OVERSEERR_HOST')
-        overseerr_api_key = os.getenv('OVERSEERR_API_KEY')  # Using OVERSEERR_API_KEY from your .env
-        
+        overseerr_api_key = os.getenv('OVERSEERR_API_KEY')
+
         if not overseerr_host or not overseerr_api_key:
             logger.error("OVERSEERR_HOST and OVERSEERR_API_KEY environment variables are required")
             sys.exit(1)
-        
+
         try:
-            overseerr_monitor_add_from_plex_cache()
+            overseerr_ok = overseerr_monitor_add_from_tmdb_cache(
+                tmdb_cache=TMDB_CACHE,
+                overseerr_cache=OVERSEERR_CACHE,
+            )
+            if not overseerr_ok or not os.path.exists(OVERSEERR_CACHE):
+                logger.error("Overseerr step did not complete successfully")
+                sys.exit(1)
             logger.info("Overseerr requests completed successfully!")
             cleanup_old_logs()
         except Exception as e:
@@ -157,7 +169,10 @@ def main():
     if 'RUN_LETTERBOXD_LISTS_TO_PLEX' in locals():
         logger.info("--- Step 5: Letterboxd Multi-List to Plex Sync ---")
         try:
-            letterboxd_lists_to_plex_main()
+            lists_ok = letterboxd_lists_to_plex_main()
+            if lists_ok is False:
+                logger.error("Letterboxd multi-list to Plex sync returned failure")
+                sys.exit(1)
             logger.info("Letterboxd multi-list to Plex sync completed successfully!")
             cleanup_old_logs()
         except Exception as e:

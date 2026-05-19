@@ -44,6 +44,9 @@ def test_scrape_lists_page_to_json():
     list_objs = []
     page = 1
     while True:
+        pagination = None
+        next_link = None
+        page_success = False
         if page == 1:
             page_url = base_url
         else:
@@ -72,6 +75,7 @@ def test_scrape_lists_page_to_json():
                 # Check for next page
                 pagination = soup.find('div', class_='pagination')
                 next_link = pagination.find('a', class_='next') if pagination else None
+                page_success = True
                 if not next_link:
                     break
                 page += 1
@@ -87,6 +91,9 @@ def test_scrape_lists_page_to_json():
                     break
         else:
             # If we exhausted all retries, stop scraping
+            break
+        if not page_success:
+            print("[ERROR] Stopping list discovery due to repeated request failures.")
             break
         # If we broke out of the retry loop due to no next page, stop
         if not (pagination and next_link):

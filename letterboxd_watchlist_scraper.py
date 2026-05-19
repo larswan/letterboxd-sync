@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import datetime
 import math
 import logging
+from urllib.parse import urlparse
 
 import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -118,40 +119,69 @@ def get_tmdb_id_from_film_page(film_slug):
 def extract_films_from_page(soup):
     """
     Extract all film data from a single Letterboxd watchlist page.
-    For each film, extract the name from the alt property of the image with class='image',
-    and the year from the end of the data-film-slug attribute (if last 4 chars are digits, else year is empty).
+    Updated to work with new Letterboxd HTML structure using griditem li elements
+    with react-component divs containing film data.
     Returns a list of film data dictionaries (no TMDB lookup).
     """
     films = []
-    poster_list = soup.find('ul', class_='poster-list')
-    if not poster_list:
-        return films
-    film_containers = poster_list.find_all('li', class_='poster-container')
+    
+    # Look for the new structure: li elements with class 'griditem' containing react-component divs
+    film_containers = soup.find_all('li', class_='griditem')
+    if not film_containers:
+        # Fallback to old structure for backward compatibility
+        poster_list = soup.find('ul', class_='poster-list')
+        if poster_list:
+            film_containers = poster_list.find_all('li', class_='poster-container')
+    
     now = datetime.datetime.now().strftime('%b %d %Y %I:%M%p').lower().replace('am', 'am').replace('pm', 'pm')
+    
     for container in film_containers:
         try:
-            poster_div = container.find('div', class_='film-poster')
-            if not poster_div:
+            # Look for react-component div with film data
+            film_div = container.find('div', class_='react-component')
+            if not film_div:
+                # Fallback to old structure
+                film_div = container.find('div', class_='film-poster')
+                if not film_div:
+                    continue
+            
+            # Extract film data from the new structure
+            film_id = film_div.get('data-film-id')
+            if not film_id:
                 continue
-            img = poster_div.find('img', class_='image')
-            film_name = img['alt'].strip() if img and img.has_attr('alt') else ''
-            film_slug = poster_div.get('data-film-slug', '')
+                
+            film_name = film_div.get('data-item-name', '').strip()
+            film_slug = film_div.get('data-item-slug', '')
+            film_link = film_div.get('data-item-link', '')
+            poster_url = film_div.get('data-poster-url', '')
+            
+            # Extract year from film name or slug
             year = ''
-            if len(film_slug) >= 4 and film_slug[-4:].isdigit():
-                year = film_slug[-4:]
+            if film_name:
+                # Try to extract year from film name (e.g., "Movie Name (2023)")
+                year_match = re.search(r'\((\d{4})\)', film_name)
+                if year_match:
+                    year = year_match.group(1)
+                else:
+                    # Try to extract from slug if it ends with 4 digits
+                    if len(film_slug) >= 4 and film_slug[-4:].isdigit():
+                        year = film_slug[-4:]
+            
             film_data = {
-                'film_id': poster_div.get('data-film-id'),
+                'film_id': film_id,
                 'film_slug': film_slug,
-                'film_link': poster_div.get('data-film-link'),
-                'poster_url': poster_div.get('data-poster-url'),
+                'film_link': film_link,
+                'poster_url': poster_url,
                 'film_name': film_name,
                 'year': year,
                 'date_scraped': now
             }
             films.append(film_data)
+            
         except Exception as e:
             print(f"Error extracting film data: {e}")
             continue
+    
     return films
 
 def get_total_film_count(soup):
@@ -232,6 +262,16 @@ def fetch_page_with_retry(url, page_num=None, max_retries=MAX_RETRIES):
     Fetch a page with retry logic for rate limiting.
     Returns the response object or None if all retries fail.
     """
+    # Headers to mimic a real browser request
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    }
+    
     for attempt in range(max_retries):
         try:
             if page_num and page_num > 1:
@@ -240,7 +280,7 @@ def fetch_page_with_retry(url, page_num=None, max_retries=MAX_RETRIES):
                 page_url = url
             
             print(f"[DEBUG] Fetching page {page_num or 1}: {page_url}")
-            response = requests.get(page_url, timeout=30)
+            response = requests.get(page_url, headers=headers, timeout=30)
             
             # Check for rate limiting (429 status code)
             if response.status_code == 429:
@@ -262,11 +302,132 @@ def fetch_page_with_retry(url, page_num=None, max_retries=MAX_RETRIES):
     
     return None
 
+def _build_letterboxd_list_radarr_url(list_url: str) -> str:
+    """
+    Convert a Letterboxd URL (e.g. https://letterboxd.com/<user>/watchlist/)
+    into the letterboxd-list-radarr endpoint URL.
+    """
+    base_url = os.getenv(
+        'LETTERBOXD_LIST_RADARR_BASE_URL',
+        'https://letterboxd-list-radarr.onrender.com'
+    ).rstrip('/')
+
+    parsed = urlparse(list_url)
+    # Keep the Letterboxd path portion only (e.g. "<user>/watchlist/").
+    letterboxd_path = parsed.path.lstrip('/')
+    return f"{base_url}/{letterboxd_path}"
+
+def _normalize_letterboxd_film_slug(clean_title: str) -> str:
+    """
+    letterboxd-list-radarr returns `clean_title` in `transform.ts` as `movie.slug`.
+    Depending on upstream changes, that slug may be a bare slug or include path
+    components like `film/<slug>` or `/film/<slug>/`.
+    """
+    if not clean_title:
+        return ''
+
+    s = str(clean_title).strip()
+    s = s.strip('/')
+    if s.startswith('film/'):
+        s = s[len('film/'):]
+    # If any path components remain, keep the last segment.
+    return s.split('/')[-1]
+
+def scrape_letterboxd_watchlist_external(list_url):
+    """
+    Scrape a watchlist via the hosted/self-hosted letterboxd-list-radarr service.
+    The service returns a streamed JSON array of Radarr-like movie objects:
+    { id, title, release_year, clean_title, ... }.
+    """
+    backend = 'external'
+    print(f"Scraping {list_url} using {backend} backend...")
+
+    all_films = []
+    try:
+        now = datetime.datetime.now().strftime('%b %d %Y %I:%M%p').lower().replace('am', 'am').replace('pm', 'pm')
+        external_url = _build_letterboxd_list_radarr_url(list_url)
+
+        # Optional query parameters
+        params = {}
+        limit = os.getenv('LETTERBOXD_LIST_RADARR_LIMIT', '').strip()
+        if limit:
+            params['limit'] = limit
+
+        error_on_empty = os.getenv('LETTERBOXD_LIST_RADARR_ERROR_ON_EMPTY', 'true').strip().lower()
+        if error_on_empty in {'true', 'false'}:
+            # letterboxd-list-radarr expects `errorOnEmpty=false|true`
+            params['errorOnEmpty'] = error_on_empty
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json,text/plain,*/*'
+        }
+
+        print(f"[INFO] Fetching external list data: {external_url}")
+        response = requests.get(external_url, params=params, headers=headers, timeout=120)
+        response.raise_for_status()
+
+        movies = response.json()
+        if not isinstance(movies, list):
+            print(f"[ERROR] External scraper returned unexpected payload type: {type(movies)}")
+            return None
+
+        for movie in movies:
+            if not isinstance(movie, dict):
+                continue
+
+            tmdb_id = movie.get('id', None)
+            title = (movie.get('title') or '').strip()
+            release_year = movie.get('release_year', None)
+            clean_title = movie.get('clean_title') or ''
+            film_slug = _normalize_letterboxd_film_slug(clean_title)
+
+            # letterboxd-list-radarr only includes entries that have a tmdb id.
+            if tmdb_id is None:
+                continue
+
+            film_link = f"https://letterboxd.com/film/{film_slug}/" if film_slug else ''
+
+            all_films.append({
+                # Keep native schema keys for compatibility with your pipeline.
+                'film_id': str(tmdb_id),
+                'film_slug': film_slug,
+                'film_link': film_link,
+                'poster_url': '',
+                'film_name': title,
+                'year': str(release_year) if release_year else '',
+                'date_scraped': now,
+                # New: allow tmdb lookup step to skip redundant API calls.
+                'tmdb_id': str(tmdb_id),
+            })
+
+        print(f"[INFO] Saving {len(all_films)} total films to {CACHE_FILE}")
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(all_films, f, indent=2)
+
+        print(f"[SUCCESS] External scraping completed! Found {len(all_films)} films")
+        return all_films
+
+    except Exception as e:
+        print(f"[ERROR] External scraping failed: {e}")
+        return None
+
 def scrape_letterboxd_watchlist(list_url):
     """
     Scrape all pages of the Letterboxd watchlist with pagination and rate limiting.
     Returns a list of all films or None if scraping fails.
     """
+    backend = os.getenv('LETTERBOXD_SCRAPER_BACKEND', 'external').lower().strip()
+    if backend == 'external':
+        films = scrape_letterboxd_watchlist_external(list_url)
+        if films is not None:
+            return films
+
+        strict = os.getenv('LETTERBOXD_EXTERNAL_SCRAPER_STRICT', '0').strip().lower() in {'1', 'true', 'yes'}
+        if strict:
+            return None
+        print("[WARN] External scraper failed; falling back to native scraper.")
+
     print(f"Scraping {list_url} with pagination and rate limiting...")
     all_films = []
     

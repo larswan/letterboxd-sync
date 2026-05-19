@@ -13,8 +13,8 @@ This is a set of Python scripts that scrapes a [Letterboxd](https://letterboxd.c
 3. **Plex Check**: For each movie, it checks if it's available in your Plex library
 4. **Plex Watchlist**: Available movies are added to a Letterboxd Watchlist playlist in your Plex Library
 5. **Shuffling:** Each time the script runs, the order of the watchlist is shuffled to keep things fresh
-6. **Radarr**: Movies not found in Plex are added to Radarr for monitoring
-7. **Cleanup**: Movies no longer in your Letterboxd watchlist are removed from Plex watchlist
+6. **Overseerr**: Movies not already available/requested in Overseerr are submitted (works even if Plex is unreachable)
+7. **Cleanup**: Movies no longer in your Letterboxd watchlist are removed from Plex watchlist (when Plex step succeeds)
 
 ### Multi-List Sync
 
@@ -46,8 +46,26 @@ python3 main.py
 
 - **TMDB API Key** (free): Get from https://www.themoviedb.org/settings/api
 - **Letterboxd Username**: Your Letterboxd profile username
+- **Scraper Backend**: Defaults to hosted `letterboxd-list-radarr` service (`LETTERBOXD_SCRAPER_BACKEND=external`)
 - **Plex Token**: From https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
 - **Optional: Radarr/Overseerr API Keys**: For automatic movie requesting
+
+#### External scraper service (recommended)
+
+This project can use the hosted [letterboxd-list-radarr](https://github.com/screeny05/letterboxd-list-radarr.git) service so you do not need to self-host a separate scraper.
+
+Set these in `.env`:
+
+```bash
+LETTERBOXD_SCRAPER_BACKEND=external
+LETTERBOXD_LIST_RADARR_BASE_URL=https://letterboxd-list-radarr.onrender.com
+```
+
+Optional tuning:
+
+- `LETTERBOXD_LIST_RADARR_LIMIT` - Limit how many movies are returned.
+- `LETTERBOXD_LIST_RADARR_ERROR_ON_EMPTY` - `true`/`false`.
+- `LETTERBOXD_EXTERNAL_SCRAPER_STRICT` - if `1`, do not fall back to native scraping when external fails.
 
 ## Scheduled Execution
 

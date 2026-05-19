@@ -31,7 +31,7 @@ def main():
     # Load TMDB cache
     if not os.path.exists(TMDB_CACHE):
         print(f"TMDB cache file '{TMDB_CACHE}' not found.")
-        return
+        return False
     with open(TMDB_CACHE, 'r') as f:
         films = json.load(f)
     logger.debug(f"Loaded {len(films)} films from TMDB cache.")
@@ -42,14 +42,14 @@ def main():
         movies_section = server.library.section('Movies')
     except Exception as e:
         print(f"[ERROR] {e}")
-        return
+        return False
 
     plex_results = []
     items_to_add = []
     for film in films:
         name = film.get('film_name')
         tmdb_id = film.get('tmdb_id')
-        year = film.get('film_year')
+        year = film.get('year')
         print(f"[DEBUG] Processing film: {name} (TMDB ID: {tmdb_id}, Year: {year})")
         if not tmdb_id:
             plex_results.append({
@@ -180,6 +180,7 @@ def main():
     with open(PLEX_CACHE, 'w') as f:
         json.dump(plex_results, f, indent=2)
     print(f"Saved Plex results for {len(plex_results)} films to {PLEX_CACHE}")
+    return True
 
 if __name__ == '__main__':
     main() 

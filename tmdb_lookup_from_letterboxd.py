@@ -62,7 +62,15 @@ def tmdb_lookup_all(letterboxd_cache=LETTERBOXD_CACHE, tmdb_cache=TMDB_CACHE, ap
         if not title or not title.strip():
             logger.warning(f"Skipping: missing title for film: {film}")
             continue
-        tmdb_id = get_tmdb_id_from_api(title, year, api_key=api_key)
+
+        # If the cache already contains TMDB ids (e.g. from the external scraper),
+        # reuse them to avoid redundant TMDB API calls.
+        cached_tmdb_id = film.get('tmdb_id', None)
+        if cached_tmdb_id is not None and str(cached_tmdb_id).strip():
+            tmdb_id = str(cached_tmdb_id)
+        else:
+            tmdb_id = get_tmdb_id_from_api(title, year, api_key=api_key)
+
         tmdb_results.append({
             'film_name': title,
             'year': year,
