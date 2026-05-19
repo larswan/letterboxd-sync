@@ -70,6 +70,33 @@ def _overseerr_headers(api_key):
     }
 
 
+class OverseerrAuthError(Exception):
+    """Raised when the Overseerr API key is invalid or lacks permissions."""
+
+
+def verify_overseerr_api(overseerr_host, api_key):
+    """
+    Preflight Overseerr credentials before processing the watchlist.
+    Uses /api/v1/auth/me so bad keys fail in one request, not per-title.
+    """
+    response = requests.get(
+        f"{overseerr_host.rstrip('/')}/api/v1/auth/me",
+        headers=_overseerr_headers(api_key),
+        timeout=15,
+    )
+    if response.status_code == 401:
+        raise OverseerrAuthError('Invalid Overseerr API key (401 Unauthorized)')
+    if response.status_code == 403:
+        raise OverseerrAuthError(
+            'Overseerr API key lacks permissions (403 Forbidden) — '
+            'ask the server admin for a key with request permissions'
+        )
+    if not response.ok:
+        raise OverseerrAuthError(
+            f'Overseerr auth check failed (HTTP {response.status_code}): {response.text[:200]}'
+        )
+
+
 def fetch_overseerr_movie(overseerr_host, api_key, tmdb_id):
     """Fetch movie details from Overseerr (includes mediaInfo when known)."""
     response = requests.get(
@@ -163,6 +190,12 @@ def overseerr_monitor_add_from_tmdb_cache(
 
     logger.info(f"Loaded {len(tmdb_results)} films from {tmdb_cache}")
 
+    try:
+        verify_overseerr_api(overseerr_host, overseerr_api_key)
+    except OverseerrAuthError as e:
+        logger.error(f"Overseerr skipped: {e}")
+        return False
+
     overseerr_results = []
     requested_count = 0
     skipped_count = 0
@@ -223,6 +256,15 @@ def overseerr_monitor_add_from_tmdb_cache(
                     error_types['Unknown response'] += 1
                     logger.debug(f"Overseerr unexpected status for '{name}': {status_label}")
 
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (401, 403):
+                error_label = _classify_overseerr_error(e)
+                logger.error(f"Overseerr aborted: {error_label}")
+                return False
+            entry['status'] = f"Error: {str(e)} [{format_date()}]"
+            error_count += 1
+            error_types[_classify_overseerr_error(e)] += 1
+            logger.debug(f"Overseerr API error for '{name}': {e}")
         except requests.RequestException as e:
             entry['status'] = f"Error: {str(e)} [{format_date()}]"
             error_count += 1

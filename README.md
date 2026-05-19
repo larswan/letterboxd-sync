@@ -11,7 +11,7 @@ This is a set of Python scripts that scrapes a [Letterboxd](https://letterboxd.c
 1. **Scraping**: The script scrapes your Letterboxd watchlist to get movie information using minimal calls to avoid strict rate limiting
 2. **ID Retrieval**: Searches TMDB for the ID of each movie for use with other APIs
 3. **Plex Check**: For each movie, it checks if it's available in your Plex library
-4. **Plex Watchlist**: Available movies are added to a Letterboxd Watchlist playlist in your Plex Library
+4. **Plex Watchlist**: Overwrites your Plex account watchlist from Letterboxd (movies only on Plex are logged to `logs/plex_list_delta.json` first). Set `PLEX_SYNC_MODE=playlist` for the old library-playlist behavior.
 5. **Shuffling:** Each time the script runs, the order of the watchlist is shuffled to keep things fresh
 6. **Overseerr**: Movies not already available/requested in Overseerr are submitted (works even if Plex is unreachable)
 7. **Cleanup**: Movies no longer in your Letterboxd watchlist are removed from Plex watchlist (when Plex step succeeds)

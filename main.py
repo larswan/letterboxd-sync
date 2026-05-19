@@ -142,22 +142,28 @@ def main():
         overseerr_api_key = os.getenv('OVERSEERR_API_KEY')
 
         if not overseerr_host or not overseerr_api_key:
-            logger.error("OVERSEERR_HOST and OVERSEERR_API_KEY environment variables are required")
-            sys.exit(1)
-
-        try:
-            overseerr_ok = overseerr_monitor_add_from_tmdb_cache(
-                tmdb_cache=TMDB_CACHE,
-                overseerr_cache=OVERSEERR_CACHE,
+            logger.warning(
+                "OVERSEERR_HOST or OVERSEERR_API_KEY not set — skipping Overseerr. "
+                "Continuing to Letterboxd lists."
             )
-            if not overseerr_ok or not os.path.exists(OVERSEERR_CACHE):
-                logger.error("Overseerr step did not complete successfully")
-                sys.exit(1)
-            logger.info("Overseerr requests completed successfully!")
-            cleanup_old_logs()
-        except Exception as e:
-            logger.error(f"Error processing Overseerr requests: {e}")
-            sys.exit(1)
+        else:
+            try:
+                overseerr_ok = overseerr_monitor_add_from_tmdb_cache(
+                    tmdb_cache=TMDB_CACHE,
+                    overseerr_cache=OVERSEERR_CACHE,
+                )
+                if overseerr_ok and os.path.exists(OVERSEERR_CACHE):
+                    logger.info("Overseerr requests completed successfully!")
+                    cleanup_old_logs()
+                else:
+                    logger.warning(
+                        "Overseerr step did not complete successfully. "
+                        "Continuing to Letterboxd lists."
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Overseerr step failed: {e}. Continuing to Letterboxd lists."
+                )
     else:
         logger.info("Skipping Overseerr requests (RUN_OVERSEERR_REQUESTS not enabled)")
     

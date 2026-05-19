@@ -65,23 +65,46 @@ def get_tmdb_id_from_api(title, year=None, api_key=None):
     return None
 
 def fetch_letterboxd_list_with_pagination_and_tmdb(list_url, list_name):
-    """Scrape a Letterboxd list by URL, handle pagination, and add TMDB IDs. Only include film_name, year, tmdb_id, date_scraped in output."""
+    """
+    Scrape a Letterboxd list by URL with pagination and TMDB IDs.
+
+    Returns dict with title, movies, complete, and blocked.
+    complete is True only when every page was fetched without a block/error.
+    """
+    import time
+
     print(f"[INFO] Scraping list: {list_url}")
     all_movies = []
     page = 1
     title = list_name
+    blocked = False
+
     while True:
         if page == 1:
             page_url = list_url
         else:
             page_url = f"{list_url}page/{page}/"
+        page_ok = False
+        next_link = None
         for attempt in range(MAX_RETRIES):
             try:
                 response = requests.get(page_url, timeout=30)
                 if response.status_code == 429:
-                    log_rate_limit_event(f"Hit rate limit. Waiting {RETRY_DELAY} seconds...")
-                    import time; time.sleep(RETRY_DELAY)
+                    blocked = True
+                    log_rate_limit_event(f"Hit rate limit on {page_url}")
+                    print(f"[ERROR] Letterboxd rate limit (429) on {page_url}")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY)
                     continue
+                if response.status_code == 403:
+                    blocked = True
+                    print(f"[ERROR] Letterboxd blocked request (403) on {page_url}")
+                    return {
+                        'title': title,
+                        'movies': all_movies,
+                        'complete': False,
+                        'blocked': True,
+                    }
                 response.raise_for_status()
                 soup = BeautifulSoup(response.text, 'html.parser')
                 # Get list title from first page only
@@ -94,7 +117,12 @@ def fetch_letterboxd_list_with_pagination_and_tmdb(list_url, list_name):
                 if not film_containers:
                     poster_list = soup.find('ul', class_='poster-list')
                     if not poster_list:
-                        return {'title': title, 'movies': all_movies}
+                        return {
+                            'title': title,
+                            'movies': all_movies,
+                            'complete': True,
+                            'blocked': False,
+                        }
                     film_containers = poster_list.find_all('li', class_='poster-container')
                 for container in film_containers:
                     try:
@@ -127,18 +155,44 @@ def fetch_letterboxd_list_with_pagination_and_tmdb(list_url, list_name):
                 # Check for next page
                 pagination = soup.find('div', class_='pagination')
                 next_link = pagination.find('a', class_='next') if pagination else None
-                if not next_link:
-                    return {'title': title, 'movies': all_movies}
-                page += 1
-                import time; time.sleep(RATE_LIMIT_DELAY)
-                break  # break retry loop if successful
+                page_ok = True
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code in (403, 429):
+                    blocked = True
+                    print(f"[ERROR] Letterboxd blocked request ({e.response.status_code}) on {page_url}")
+                    return {
+                        'title': title,
+                        'movies': all_movies,
+                        'complete': False,
+                        'blocked': True,
+                    }
+                print(f"[ERROR] Failed to scrape {page_url}: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RATE_LIMIT_DELAY)
             except Exception as e:
                 print(f"[ERROR] Failed to scrape {page_url}: {e}")
                 if attempt < MAX_RETRIES - 1:
-                    import time; time.sleep(RATE_LIMIT_DELAY)
-                else:
-                    return {'title': title, 'movies': all_movies}
-    return {'title': title, 'movies': all_movies}
+                    time.sleep(RATE_LIMIT_DELAY)
+
+        if blocked or not page_ok:
+            return {
+                'title': title,
+                'movies': all_movies,
+                'complete': False,
+                'blocked': blocked,
+            }
+
+        if not next_link:
+            return {
+                'title': title,
+                'movies': all_movies,
+                'complete': True,
+                'blocked': False,
+            }
+
+        page += 1
+        time.sleep(RATE_LIMIT_DELAY)
 
 def plex_playlists_from_lists_cache(lists_cache):
     if not PLEX_HOST or not PLEX_TOKEN:
@@ -227,31 +281,45 @@ def plex_playlists_from_lists_cache(lists_cache):
     print(f"[INFO] Saved Plex list cache to {PLEX_LIST_CACHE_FILE}")
 
 def main():
-    # Step 1: Run get_letterboxd_lists.py to get all lists and names
-    from lists.get_letterboxd_lists import test_scrape_lists_page_to_json
-    test_scrape_lists_page_to_json()
-    # Step 2: Load list_names.json
-    if not os.path.exists(LIST_NAMES_FILE):
-        print(f"[ERROR] Missing expected file: {LIST_NAMES_FILE}")
-        return False
-    with open(LIST_NAMES_FILE, 'r') as f:
-        list_objs = json.load(f)
-    print(f"[INFO] Loaded {len(list_objs)} lists from list_names.json")
+    from lists.get_letterboxd_lists import discover_letterboxd_lists
+
+    # Step 1: Discover all list index pages (must finish without blocks)
+    discovery = discover_letterboxd_lists(save_to_cache=True)
+    print(f"[INFO] {discovery['message']}")
+
+    if not discovery['complete']:
+        print("[WARN] Skipping list scrape and Plex playlist sync — Letterboxd list index was not fully scraped.")
+        return True
+
+    list_objs = discovery['lists']
     if not list_objs:
         print("[WARN] No Letterboxd lists discovered.")
         return True
-    # Step 3: Scrape each list and build cache
+
+    # Step 2: Scrape each list (all must complete before touching Plex)
     lists_cache = {}
     for obj in list_objs:
         name = obj['name']
         url = obj['url']
-        # Remove trailing slash for slug extraction if needed
         slug = url.rstrip('/').split('/')[-1]
-        lists_cache[slug] = fetch_letterboxd_list_with_pagination_and_tmdb(url, name)
+        result = fetch_letterboxd_list_with_pagination_and_tmdb(url, name)
+        if not result.get('complete'):
+            reason = 'blocked by Letterboxd' if result.get('blocked') else 'incomplete'
+            print(
+                f"[WARN] List '{name}' scrape {reason} — "
+                "skipping Plex playlist sync entirely (existing playlists unchanged)."
+            )
+            return True
+        lists_cache[slug] = {
+            'title': result['title'],
+            'movies': result['movies'],
+        }
+
     with open(LISTS_CACHE_FILE, 'w') as f:
         json.dump(lists_cache, f, indent=2)
     print(f"[INFO] Saved all lists to {LISTS_CACHE_FILE}")
-    # Step 4: Create/update Plex playlists
+
+    # Step 3: Create/update Plex playlists
     plex_playlists_from_lists_cache(lists_cache)
     return True
 
