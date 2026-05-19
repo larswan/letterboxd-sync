@@ -1,29 +1,34 @@
 import os
 import json
+import re
 import time
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Setup paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LISTS_DIR = BASE_DIR
-os.makedirs(LISTS_DIR, exist_ok=True)
-
 LIST_NAMES_FILE = os.path.join(os.path.dirname(BASE_DIR), 'cache', 'list_names.json')
 
 load_dotenv()
 
 LETTERBOXD_USERNAME = os.getenv('LETTERBOXD_USERNAME')
-
-RATE_LIMIT_DELAY = 2
+RATE_LIMIT_DELAY = int(os.getenv('LETTERBOXD_LIST_RATE_LIMIT_DELAY', '5'))
 MAX_RETRIES = 3
 RETRY_DELAY = 30
 
 RATE_LIMIT_LOG = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'logs', 'letterboxd-rate-limit'
 )
+
+DEFAULT_HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    ),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
 
 
 def log_rate_limit_event(message):
@@ -32,8 +37,71 @@ def log_rate_limit_event(message):
 
 
 def _letterboxd_block_status(response):
-    """Return True if Letterboxd blocked or rate-limited this request."""
     return response is not None and response.status_code in (403, 429)
+
+
+def _list_link_pattern(username):
+    return re.compile(rf'^/{re.escape(username)}/list/([^/]+)/$')
+
+
+def _parse_list_links_from_html(html, username):
+    """
+    Letterboxd changed the lists index markup; list links are still stable at
+    /{user}/list/{slug}/.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    pattern = _list_link_pattern(username)
+    lists_by_url = {}
+
+    for anchor in soup.find_all('a', href=True):
+        href = anchor['href'].split('?')[0]
+        match = pattern.match(href)
+        if not match:
+            continue
+        slug = match.group(1)
+        if slug == 'edit':
+            continue
+
+        name = anchor.get_text(' ', strip=True)
+        if not name or name.lower() == 'edit list':
+            name = slug.replace('-', ' ').title()
+
+        url = href if href.startswith('http') else f'https://letterboxd.com{href}'
+        lists_by_url[url] = {'name': name, 'url': url}
+
+    return list(lists_by_url.values())
+
+
+def _extra_lists_from_env(username):
+    """Optional manual list URLs/slugs when Letterboxd blocks pagination."""
+    raw = os.getenv('LETTERBOXD_EXTRA_LIST_URLS', '').strip()
+    if not raw:
+        return []
+
+    lists = []
+    for entry in raw.split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if entry.startswith('http'):
+            url = entry.rstrip('/') + '/'
+            slug = url.rstrip('/').split('/')[-1]
+        else:
+            slug = entry.strip('/').split('/')[-1]
+            url = f'https://letterboxd.com/{username}/list/{slug}/'
+        lists.append({
+            'name': slug.replace('-', ' ').title(),
+            'url': url,
+        })
+    return lists
+
+
+def _merge_lists(*list_groups):
+    merged = {}
+    for group in list_groups:
+        for item in group:
+            merged[item['url']] = item
+    return list(merged.values())
 
 
 def discover_letterboxd_lists(save_to_cache=True):
@@ -56,13 +124,17 @@ def discover_letterboxd_lists(save_to_cache=True):
             'message': 'LETTERBOXD_USERNAME not set in .env',
         }
 
-    base_url = f"https://letterboxd.com/{LETTERBOXD_USERNAME}/lists/"
+    base_url = f'https://letterboxd.com/{LETTERBOXD_USERNAME}/lists/'
     print(f"[INFO] Scraping lists page: {base_url}")
+
+    session = requests.Session()
+    session.headers.update(DEFAULT_HEADERS)
 
     list_objs = []
     blocked = False
     complete = False
     page = 1
+    expected_pages = None
 
     while True:
         page_url = base_url if page == 1 else f"{base_url}page/{page}/"
@@ -74,7 +146,7 @@ def discover_letterboxd_lists(save_to_cache=True):
 
         for attempt in range(MAX_RETRIES):
             try:
-                response = requests.get(page_url, timeout=30)
+                response = session.get(page_url, timeout=30)
                 if response.status_code == 429:
                     blocked = True
                     log_rate_limit_event(
@@ -90,26 +162,31 @@ def discover_letterboxd_lists(save_to_cache=True):
                     break
 
                 response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'html.parser')
-                for section in soup.find_all('section', class_='list'):
-                    h2 = section.find('h2', class_='title-2')
-                    if h2:
-                        a = h2.find('a', href=True)
-                        if a:
-                            name = a.get_text(strip=True)
-                            url = a['href']
-                            if url.startswith('/'):
-                                url = f"https://letterboxd.com{url}"
-                            list_objs.append({'name': name, 'url': url})
+                page_lists = _parse_list_links_from_html(response.text, LETTERBOXD_USERNAME)
+                list_objs = _merge_lists(list_objs, page_lists)
+                print(f"[INFO] Found {len(page_lists)} list(s) on page {page}")
 
+                soup = BeautifulSoup(response.text, 'html.parser')
                 pagination = soup.find('div', class_='pagination')
                 next_link = pagination.find('a', class_='next') if pagination else None
+                if pagination:
+                    page_links = pagination.find_all('a', href=True)
+                    page_numbers = []
+                    for link in page_links:
+                        text = link.get_text(strip=True)
+                        if text.isdigit():
+                            page_numbers.append(int(text))
+                    if page_numbers:
+                        expected_pages = max(page_numbers)
+
                 page_ok = True
                 break
             except requests.exceptions.HTTPError as e:
                 if _letterboxd_block_status(e.response):
                     blocked = True
-                    print(f"[ERROR] Letterboxd blocked request ({e.response.status_code}) on page {page}")
+                    print(
+                        f"[ERROR] Letterboxd blocked request ({e.response.status_code}) on page {page}"
+                    )
                     break
                 print(f"[ERROR] HTTP error on attempt {attempt + 1}: {e}")
                 if attempt < MAX_RETRIES - 1:
@@ -134,11 +211,24 @@ def discover_letterboxd_lists(save_to_cache=True):
             complete = True
             break
 
+        if expected_pages and page >= expected_pages:
+            complete = True
+            break
+
         page += 1
         time.sleep(RATE_LIMIT_DELAY)
 
+    extra_lists = _extra_lists_from_env(LETTERBOXD_USERNAME)
+    if extra_lists:
+        print(f"[INFO] Merged {len(extra_lists)} list(s) from LETTERBOXD_EXTRA_LIST_URLS")
+        list_objs = _merge_lists(list_objs, extra_lists)
+
+    # If every page was fetched, or there is only one page, treat discovery as complete.
+    if not complete and not blocked and page == 1 and not next_link:
+        complete = True
+
     if complete:
-        message = f"Discovered {len(list_objs)} Letterboxd list(s) across {page} page(s)"
+        message = f"Discovered {len(list_objs)} Letterboxd list(s)"
         if save_to_cache:
             os.makedirs(os.path.dirname(LIST_NAMES_FILE), exist_ok=True)
             with open(LIST_NAMES_FILE, 'w', encoding='utf-8') as f:
@@ -146,8 +236,9 @@ def discover_letterboxd_lists(save_to_cache=True):
             print(f"[INFO] Saved list names and URLs to {LIST_NAMES_FILE}")
     elif blocked:
         message = (
-            f"Letterboxd blocked list discovery (stopped on page {page}); "
-            "Plex playlists will not be updated"
+            f"Letterboxd blocked list discovery on page {page} "
+            f"({len(list_objs)} list(s) found so far). "
+            "Add missing lists via LETTERBOXD_EXTRA_LIST_URLS or retry later."
         )
         print(f"[WARN] {message}")
     else:

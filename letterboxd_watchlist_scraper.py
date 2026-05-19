@@ -333,7 +333,7 @@ def _normalize_letterboxd_film_slug(clean_title: str) -> str:
     # If any path components remain, keep the last segment.
     return s.split('/')[-1]
 
-def scrape_letterboxd_watchlist_external(list_url):
+def scrape_letterboxd_watchlist_external(list_url, save_cache=True):
     """
     Scrape a watchlist via the hosted/self-hosted letterboxd-list-radarr service.
     The service returns a streamed JSON array of Radarr-like movie objects:
@@ -401,9 +401,10 @@ def scrape_letterboxd_watchlist_external(list_url):
                 'tmdb_id': str(tmdb_id),
             })
 
-        print(f"[INFO] Saving {len(all_films)} total films to {CACHE_FILE}")
-        with open(CACHE_FILE, 'w') as f:
-            json.dump(all_films, f, indent=2)
+        if save_cache:
+            print(f"[INFO] Saving {len(all_films)} total films to {CACHE_FILE}")
+            with open(CACHE_FILE, 'w') as f:
+                json.dump(all_films, f, indent=2)
 
         print(f"[SUCCESS] External scraping completed! Found {len(all_films)} films")
         return all_films

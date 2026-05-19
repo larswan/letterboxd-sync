@@ -64,6 +64,48 @@ def get_tmdb_id_from_api(title, year=None, api_key=None):
         print(f"[TMDB] API error for '{title}': {e}")
     return None
 
+def fetch_letterboxd_list_external(list_url, list_name):
+    """Fetch a list via letterboxd-list-radarr (same service as the watchlist scraper)."""
+    from letterboxd_watchlist_scraper import scrape_letterboxd_watchlist_external
+
+    print(f"[INFO] Scraping list via external backend: {list_url}")
+    films = scrape_letterboxd_watchlist_external(list_url, save_cache=False)
+    if films is None:
+        return {
+            'title': list_name,
+            'movies': [],
+            'complete': False,
+            'blocked': False,
+        }
+
+    movies = []
+    now = datetime.now().strftime('%b %d %Y %I:%M%p').lower()
+    for film in films:
+        movies.append({
+            'film_name': film.get('film_name'),
+            'year': film.get('year'),
+            'tmdb_id': film.get('tmdb_id'),
+            'date_scraped': film.get('date_scraped') or now,
+        })
+
+    return {
+        'title': list_name,
+        'movies': movies,
+        'complete': True,
+        'blocked': False,
+    }
+
+
+def fetch_letterboxd_list(list_url, list_name):
+    backend = os.getenv('LETTERBOXD_SCRAPER_BACKEND', 'external').lower().strip()
+    if backend == 'external':
+        result = fetch_letterboxd_list_external(list_url, list_name)
+        if result.get('complete'):
+            return result
+        print(f"[WARN] External list scrape failed for {list_url}; falling back to HTML.")
+    return fetch_letterboxd_list_with_pagination_and_tmdb(list_url, list_name)
+
+
 def fetch_letterboxd_list_with_pagination_and_tmdb(list_url, list_name):
     """
     Scrape a Letterboxd list by URL with pagination and TMDB IDs.
@@ -302,7 +344,7 @@ def main():
         name = obj['name']
         url = obj['url']
         slug = url.rstrip('/').split('/')[-1]
-        result = fetch_letterboxd_list_with_pagination_and_tmdb(url, name)
+        result = fetch_letterboxd_list(url, name)
         if not result.get('complete'):
             reason = 'blocked by Letterboxd' if result.get('blocked') else 'incomplete'
             print(
